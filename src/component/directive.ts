@@ -299,14 +299,14 @@ QWeb.addDirective({
       }
       let eventsCode = events
         .map(function([name, value]) {
-          const { event, handler } = makeHandlerCode(
+          const { event, handler, options } = makeHandlerCode(
             ctx,
             name,
             value,
             false,
             T_COMPONENT_MODS_CODE
           );
-          return `vn.elm.addEventListener('${event}', ${handler});`;
+          return `vn.elm.addEventListener('${event}', ${handler}, ${options});`;
         })
         .join("");
       const styleExpr = tattStyle || (styleAttr ? `'${styleAttr}'` : false);

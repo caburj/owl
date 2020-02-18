@@ -1902,6 +1902,40 @@ describe("other directives with t-component", () => {
     expect(env.qweb.templates.ParentWidget.fn.toString()).toMatchSnapshot();
   });
 
+  test("t-on with capture option", async () => {
+    env.qweb.addTemplates(`
+      <templates>
+        <div t-name="ParentWidget" >
+          <t t-component="child" t-on-ev.capture="onParent" />
+        </div>
+        <div t-name="Child"><t t-component="child"/></div>
+      </templates>
+    `);
+    const steps: string[] = [];
+    class GrandChild extends Component {
+      static template = xml`<div t-on-ev="onGrandChild"/>`;
+      onGrandChild() {
+        steps.push("onGrandChild");
+      }
+    }
+    class Child extends Component {
+      static components = { child: GrandChild };
+    }
+    class ParentWidget extends Component {
+      static components = { child: Child };
+      onParent() {
+        steps.push("onParent");
+      }
+    }
+    const widget = new ParentWidget();
+    await widget.mount(fixture);
+    const child = children(widget)[0];
+    const grandChild = children(child)[0];
+    grandChild.trigger("ev");
+    expect(steps).toEqual(["onParent", "onGrandChild"]);
+    expect(env.qweb.templates.ParentWidget.fn.toString()).toMatchSnapshot();
+  });
+
   test("t-on with stop and/or prevent modifiers", async () => {
     expect.assertions(7);
     env.qweb.addTemplates(`

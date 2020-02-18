@@ -26,9 +26,20 @@ export const MODS_CODE = {
   stop: "e.stopPropagation();"
 };
 
+const DEFAULT_EVENT_OPTIONS = {
+  capture: false,
+  once: false,
+  passive: false
+};
+
+const getEventOptionsCode = ({capture, once, passive}) => {
+  return `{capture:${capture},once:${once},passive:${passive}}`;
+}
+
 interface HandlerInfo {
   event: string;
   handler: string;
+  options: string;
 }
 
 const FNAMEREGEXP = /^[$A-Z_][0-9A-Z_$]*$/i;
@@ -71,14 +82,21 @@ export function makeHandlerCode(
     putInCache = false;
     code = ctx.captureExpression(value);
   }
-  const modCode = mods.map(mod => modcodes[mod]).join("");
+  const modCode = mods.map(mod => modcodes[mod]).filter(Boolean).join("");
+  const eventParams = Object.assign({}, DEFAULT_EVENT_OPTIONS);
+  for (let mod of mods) {
+    if (mod in eventParams) {
+      eventParams[mod] = true;
+      console.log(mod);
+    }
+  }
   let handler = `function (e) {if (!context.__owl__.isMounted){return}${modCode}${code}}`;
   if (putInCache) {
     const key = ctx.generateTemplateKey(event);
     ctx.addLine(`extra.handlers[${key}] = extra.handlers[${key}] || ${handler};`);
     handler = `extra.handlers[${key}]`;
   }
-  return { event, handler };
+  return { event, handler, options: getEventOptionsCode(eventParams) };
 }
 
 QWeb.addDirective({

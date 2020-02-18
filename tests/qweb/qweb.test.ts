@@ -1617,6 +1617,31 @@ describe("t-on", () => {
 
     expect(steps).toEqual(["onClick"]);
   });
+
+  test("t-on capture", async () => {
+    expect.assertions(2);
+    qweb.addTemplate("test", `
+      <div t-on-click.capture="onCaptureClick">
+        <button t-on-click="onClick">Click Capture</button>
+      </div>
+    `);
+    const steps: string[] = [];
+    const owner = {
+      onClick() {
+        steps.push("onClick");
+      },
+      onCaptureClick() {
+        steps.push("onCaptureClick")
+      }
+    };
+
+    const node = <HTMLElement>renderToDOM(qweb, "test", owner, { handlers: [] });
+
+    node.querySelector("button")!.click();
+    console.log(steps);
+
+    expect(steps).toEqual(["onCaptureClick", "onClick", "onCaptureClick"]);
+  });
 });
 
 describe("t-ref", () => {
