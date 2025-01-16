@@ -17,6 +17,47 @@ type Reactive<T extends Target> = T;
 type Collection = Set<any> | Map<any, any> | WeakMap<any, any>;
 type CollectionRawType = "Set" | "Map" | "WeakMap";
 
+enum ChangeType {
+  Added,
+  Deleted,
+  Updated,
+  Cleared,
+}
+
+const added = (target: Target, key: PropertyKey, value: any) => ({
+  type: ChangeType.Added,
+  target,
+  key,
+  value,
+});
+
+const deleted = (target: Target, key: PropertyKey, value: any) => ({
+  type: ChangeType.Deleted,
+  target,
+  key,
+  value,
+});
+
+const updated = (target: Target, key: PropertyKey, value: any, originalValue: any) => ({
+  type: ChangeType.Updated,
+  target,
+  key,
+  value,
+  originalValue,
+});
+
+const cleared = (target: Target, keys: PropertyKey[]) => ({
+  type: ChangeType.Cleared,
+  target,
+  keys,
+});
+
+type Change =
+  | ReturnType<typeof added>
+  | ReturnType<typeof deleted>
+  | ReturnType<typeof updated>
+  | ReturnType<typeof cleared>;
+
 const objectToString = Object.prototype.toString;
 const objectHasOwnProperty = Object.prototype.hasOwnProperty;
 
@@ -117,7 +158,7 @@ function observeTargetKey(target: Target, key: PropertyKey, callback: Callback):
  * @param key the key that changed (or Symbol `KEYCHANGES` if a key was created
  *   or deleted)
  */
-function notifyReactives(target: Target, key: PropertyKey): void {
+function notifyReactives(target: Target, key: PropertyKey, payload?: Change): void {
   const keyToCallbacks = targetToKeysToCallbacks.get(target);
   if (!keyToCallbacks) {
     return;
@@ -129,7 +170,7 @@ function notifyReactives(target: Target, key: PropertyKey): void {
   // Loop on copy because clearReactivesForCallback will modify the set in place
   for (const callback of [...callbacks]) {
     clearReactivesForCallback(callback);
-    callback();
+    callback(payload);
   }
 }
 
@@ -252,7 +293,7 @@ function basicProxyHandler<T extends Target>(callback: Callback): ProxyHandler<T
       const originalValue = Reflect.get(target, key, receiver);
       const ret = Reflect.set(target, key, toRaw(value), receiver);
       if (!hadKey && objectHasOwnProperty.call(target, key)) {
-        notifyReactives(target, KEYCHANGES);
+        notifyReactives(target, KEYCHANGES, added(target, key, value));
       }
       // While Array length may trigger the set trap, it's not actually set by this
       // method but is updated behind the scenes, and the trap is not called with the
@@ -261,15 +302,15 @@ function basicProxyHandler<T extends Target>(callback: Callback): ProxyHandler<T
         originalValue !== Reflect.get(target, key, receiver) ||
         (key === "length" && Array.isArray(target))
       ) {
-        notifyReactives(target, key);
+        notifyReactives(target, key, updated(target, key, value, originalValue));
       }
       return ret;
     },
     deleteProperty(target, key) {
+      const originalValue = Reflect.get(target, key);
       const ret = Reflect.deleteProperty(target, key);
       // TODO: only notify when something was actually deleted
-      notifyReactives(target, KEYCHANGES);
-      notifyReactives(target, key);
+      notifyReactives(target, KEYCHANGES, deleted(target, key, originalValue));
       return ret;
     },
     ownKeys(target) {
@@ -355,22 +396,37 @@ function makeForEachObserver(target: any, callback: Callback) {
  *  value before calling the delegate method for comparison purposes
  * @param target @see reactive
  */
-function delegateAndNotify(
-  setterName: "set" | "add" | "delete",
-  getterName: "has" | "get",
-  target: any
-) {
+function delegateAndNotifySet(setterName: "add" | "delete", target: any) {
   return (key: any, value: any) => {
     key = toRaw(key);
     const hadKey = target.has(key);
-    const originalValue = target[getterName](key);
     const ret = target[setterName](key, value);
     const hasKey = target.has(key);
     if (hadKey !== hasKey) {
-      notifyReactives(target, KEYCHANGES);
+      if (hadKey) {
+        notifyReactives(target, KEYCHANGES, deleted(target, key, value));
+      } else {
+        notifyReactives(target, KEYCHANGES, added(target, key, value));
+      }
     }
-    if (originalValue !== target[getterName](key)) {
-      notifyReactives(target, key);
+    return ret;
+  };
+}
+function delegateAndNotifyMap(setterName: "set" | "delete", target: any) {
+  return (key: any, value: any) => {
+    key = toRaw(key);
+    const hadKey = target.has(key);
+    const originalValue = target.get(key);
+    const ret = target[setterName](key, value);
+    const hasKey = target.has(key);
+    if (hadKey !== hasKey) {
+      if (hadKey) {
+        notifyReactives(target, KEYCHANGES, deleted(target, key, value));
+      } else {
+        notifyReactives(target, KEYCHANGES, added(target, key, value));
+      }
+    } else if (hadKey && originalValue !== value) {
+      notifyReactives(target, key, updated(target, key, value, originalValue));
     }
     return ret;
   };
@@ -385,7 +441,7 @@ function makeClearNotifier(target: Map<any, any> | Set<any>) {
   return () => {
     const allKeys = [...target.keys()];
     target.clear();
-    notifyReactives(target, KEYCHANGES);
+    notifyReactives(target, KEYCHANGES, cleared(target, allKeys));
     for (const key of allKeys) {
       notifyReactives(target, key);
     }
@@ -401,8 +457,8 @@ function makeClearNotifier(target: Map<any, any> | Set<any>) {
 const rawTypeToFuncHandlers = {
   Set: (target: any, callback: Callback) => ({
     has: makeKeyObserver("has", target, callback),
-    add: delegateAndNotify("add", "has", target),
-    delete: delegateAndNotify("delete", "has", target),
+    add: delegateAndNotifySet("add", target),
+    delete: delegateAndNotifySet("delete", target),
     keys: makeIteratorObserver("keys", target, callback),
     values: makeIteratorObserver("values", target, callback),
     entries: makeIteratorObserver("entries", target, callback),
@@ -417,8 +473,8 @@ const rawTypeToFuncHandlers = {
   Map: (target: any, callback: Callback) => ({
     has: makeKeyObserver("has", target, callback),
     get: makeKeyObserver("get", target, callback),
-    set: delegateAndNotify("set", "get", target),
-    delete: delegateAndNotify("delete", "has", target),
+    set: delegateAndNotifyMap("set", target),
+    delete: delegateAndNotifyMap("delete", target),
     keys: makeIteratorObserver("keys", target, callback),
     values: makeIteratorObserver("values", target, callback),
     entries: makeIteratorObserver("entries", target, callback),
@@ -433,8 +489,8 @@ const rawTypeToFuncHandlers = {
   WeakMap: (target: any, callback: Callback) => ({
     has: makeKeyObserver("has", target, callback),
     get: makeKeyObserver("get", target, callback),
-    set: delegateAndNotify("set", "get", target),
-    delete: delegateAndNotify("delete", "has", target),
+    set: delegateAndNotifyMap("set", target),
+    delete: delegateAndNotifyMap("delete", target),
   }),
 };
 /**
