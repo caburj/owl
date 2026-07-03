@@ -17,7 +17,15 @@ export {
 } from "./scope";
 
 // Reactivity: proxy
-export { proxy, markRaw, toRaw, proxifyTarget } from "./proxy";
+export {
+  proxy,
+  markRaw,
+  toRaw,
+  proxifyTarget,
+  onMutation,
+  type Mutation,
+  type MutationObserver,
+} from "./proxy";
 
 // Reactivity: computations (core tracking primitives)
 export {

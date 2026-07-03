@@ -1,8 +1,80 @@
 import { OwlError } from "./owl_error";
-import { onReadAtom, onWriteAtom, Atom } from "./computations";
+import { onReadAtom, onWriteAtom, untrack, Atom } from "./computations";
 
 // Special key to subscribe to, to be notified of key creation/deletion
 const KEYCHANGES = Symbol("Key changes");
+
+/**
+ * Describes a single raw mutation observed on a proxied object, array, or
+ * collection. This is intentionally minimal: it reports the *leaf* target whose
+ * slot changed (nested writes report the child object, not the root) and does
+ * NOT include a path or root, since owl caches one proxy per target and those
+ * cannot be produced cheaply/correctly. Consumers assemble coordinates
+ * themselves.
+ */
+export interface Mutation {
+  target: object; // the object/array/collection whose slot changed (the LEAF target)
+  key: PropertyKey; // property key / array index / "length" / map or set key
+  oldValue: unknown;
+  newValue: unknown; // undefined on delete
+  isDelete: boolean;
+}
+
+export type MutationObserver = (m: Mutation) => void;
+
+// Registry of active mutation observers. When empty, the write path must not
+// allocate any Mutation payload (zero always-on cost).
+const mutationObservers: MutationObserver[] = [];
+
+/**
+ * Register a global observer of raw proxy mutations. The callback is invoked
+ * (inside `untrack`, so reading proxies from it cannot corrupt the current
+ * computation) whenever a proxied object/array slot is set or deleted, and for
+ * clean Map/Set insertions.
+ *
+ * @param cb the observer to notify on each mutation
+ * @returns an unsubscribe function
+ */
+export function onMutation(cb: MutationObserver): () => void {
+  mutationObservers.push(cb);
+  return () => {
+    const index = mutationObservers.indexOf(cb);
+    if (index !== -1) {
+      mutationObservers.splice(index, 1);
+    }
+  };
+}
+
+/**
+ * Build a Mutation payload and dispatch it to all registered observers.
+ *
+ * Guards on an empty observer list *before* building the payload so there is no
+ * allocation on the write path when nothing is observing. Dispatch happens
+ * inside `untrack` and iterates over a snapshot of the observer list so that
+ * unsubscribing during dispatch is safe; each callback is wrapped in try/catch
+ * so a throwing observer cannot break the write that triggered it.
+ */
+function notifyMutation(
+  target: object,
+  key: PropertyKey,
+  oldValue: unknown,
+  newValue: unknown,
+  isDelete: boolean
+): void {
+  if (mutationObservers.length === 0) {
+    return;
+  }
+  const mutation: Mutation = { target, key, oldValue, newValue, isDelete };
+  untrack(() => {
+    for (const observer of mutationObservers.slice()) {
+      try {
+        observer(mutation);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  });
+}
 
 // The following types only exist to signify places where objects are expected
 // to be proxy or not, they provide no type checking benefit over "object"
@@ -221,14 +293,22 @@ function basicProxyHandler<T extends Target>(atom: Atom | null): ProxyHandler<T>
         (key === "length" && Array.isArray(target))
       ) {
         onWriteTargetKey(target, key, atom);
+        notifyMutation(target, key, originalValue, Reflect.get(target, key, receiver), false);
       }
       return ret;
     },
     deleteProperty(target, key) {
+      // Guard so no-op deletes (key not present) stay silent; read the old
+      // value before the delete so it can be reported.
+      const hadKey = objectHasOwnProperty.call(target, key);
+      const oldValue = hadKey ? Reflect.get(target, key) : undefined;
       const ret = Reflect.deleteProperty(target, key);
       // TODO: only notify when something was actually deleted
       onWriteTargetKey(target, KEYCHANGES, atom);
       onWriteTargetKey(target, key, atom);
+      if (hadKey) {
+        notifyMutation(target, key, oldValue, undefined, true);
+      }
       return ret;
     },
     ownKeys(target) {
@@ -331,6 +411,22 @@ function delegateAndNotify(
     if (originalValue !== target[getterName](key)) {
       onWriteTargetKey(target, key, null);
     }
+    // Mutation hook (best-effort for collections): only emit for clean
+    // insertions/updates where old/new/key are unambiguous.
+    if (setterName === "set") {
+      // Map/WeakMap.set: `key` is the map key, old/new are the values.
+      const newValue = target[getterName](key);
+      if (originalValue !== newValue) {
+        notifyMutation(target, key, originalValue, newValue, false);
+      }
+    } else if (setterName === "add") {
+      // Set.add: the "key" IS the value; only emit for a genuinely new member.
+      if (!hadKey && hasKey) {
+        notifyMutation(target, key, undefined, key, false);
+      }
+    } else {
+      // TODO(owl-sync): emit mutation for collection delete (Map/Set/WeakMap)
+    }
     return ret;
   };
 }
@@ -347,6 +443,7 @@ function makeClearNotifier(target: Map<any, any> | Set<any>) {
     onWriteTargetKey(target, KEYCHANGES, null);
     for (const key of allKeys) {
       onWriteTargetKey(target, key, null);
+      // TODO(owl-sync): emit mutation for clear() (bulk delete of each key)
     }
   };
 }
